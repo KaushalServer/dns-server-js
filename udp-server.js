@@ -103,6 +103,9 @@ function updateResponseTtl(buffer, ttl){
     }
 
     // Update Authority TTL
+    for (const authority of dnsMessage.authority) {
+        buffer.writeUInt32BE(ttl, authority.ttlOffset)
+    }
 }
 
 // ###########################################
@@ -348,14 +351,13 @@ upstream.on("message", (response, remote) => {
                 );
             }
 
-            clearTimeout(client.timeout)
             const answer = dnsResponse.answers[0]
 
             // Temp
             console.log("Total answers: ", dnsResponse.answers.length);
             dnsResponse.answers.forEach((answer, index) => {
                 console.log(
-                    `Answer ${index + 1} :`, answer.address, "| TTL: ", answer.ttl        
+                    `Answer ${index + 1} :`, answer.address, "| TTL: ", answer.ttl
                 );
             });
 
@@ -379,7 +381,7 @@ upstream.on("message", (response, remote) => {
                     );
 
                     storeCache(
-                        client.cacheKey, response, answer.ttl
+                        client.cacheKey, response, ttl
                     )
 
                 } else {
@@ -452,9 +454,6 @@ upstream.on("message", (response, remote) => {
 
                     console.log(
                         "\nUpstream response forwarded to client!"
-                    );
-                    pendingRequests.delete(
-                        transactionId
                     );
                 }
             );
