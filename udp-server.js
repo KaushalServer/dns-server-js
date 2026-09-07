@@ -23,6 +23,16 @@ const records = {
 
 const cache = new Map();
 
+function generateTransactionId(){
+    let transactionId
+
+    do{
+        transactionId = Math.floor(Math.random() * 65536)
+    } while (pendingRequests.has(transactionId))
+
+    return transactionId
+}
+
 function getCachedResponse(domain){
     const entry = cache.get(domain)
 
@@ -86,10 +96,13 @@ function getRcodeName(rcode) {
 function updateResponseTtl(buffer, ttl){
     const dnsMessage = parseDnsMessage(buffer)
 
+    // Update Answer TTL
     // let offset = header.questionEndOffset
     for( const answer of dnsMessage.answers){
         buffer.writeUInt32BE(ttl, answer.ttlOffset)
     }
+
+    // Update Authority TTL
 }
 
 // ###########################################
@@ -195,7 +208,10 @@ server.on("message", (message, remote) => {
         console.log("\n Domain not found locally.");
 
         // console.log("Forwarding query to upstream DNS:- ", UPSTREAM_DNS);
-        const transactionId = dnsMessage.header.transactionId
+        const transactionId = generateTransactionId()
+
+        // logging upstream transactionId and header transactionId
+        console.log(`Client TXID: ${dnsMessage.header.transactionId} || Upstream TXID: ${transactionId}`);
 
         const timeout = setTimeout(() => {
             console.error(`Upstream DNS timeout for transaction ${transactionId}`)
@@ -209,6 +225,7 @@ server.on("message", (message, remote) => {
                 port: remote.port,
                 domain,
                 cacheKey,
+                clientTransactionId: dnsMessage.header.transactionId,
                 timeout
             }
         )
@@ -217,13 +234,21 @@ server.on("message", (message, remote) => {
 
         console.log("Forwarding to: ", UPSTREAM_DNS);
 
+        const upstreamRequest = Buffer.from(message);
+
+        upstreamRequest.writeUInt16BE(
+            transactionId,
+            0
+        );
+
         upstream.send(
-            message, 
+            upstreamRequest,
             UPSTREAM_PORT, 
             UPSTREAM_DNS,
             (error) => {
                 if(error) {
                     console.error("Upstream send error: ", error);
+                    clearTimeout(timeout)
                     pendingRequests.delete(transactionId)
                     return
                 }
@@ -290,6 +315,33 @@ upstream.on("message", (response, remote) => {
                 return;
             }
 
+            if (!dnsResponse.flags.isResponse) {
+                console.error(
+                    `Invalid upstream packet: transaction ${transactionId} is not a DNS response`
+                );
+
+                return;
+            }
+
+            if (
+                !dnsResponse.questions.length ||
+                dnsResponse.questions[0].domain.toLowerCase() !== client.domain
+            ) {
+                console.error(
+                    `Invalid upstream response: domain mismatch for transaction ${transactionId}`
+                );
+
+                return;
+            }
+
+            console.log(
+                `Received upstream TXID: ${transactionId} | Restoring client TXID: ${client.clientTransactionId}`
+            );
+
+            // Request completed successfully
+            clearTimeout(client.timeout)
+            pendingRequests.delete(transactionId)
+
             if (rcode !== 0) {
                 console.log(
                     `Upstream returned ${rcodeName} for ${client.domain}`
@@ -307,6 +359,7 @@ upstream.on("message", (response, remote) => {
                 );
             });
 
+            // handling cache
             if(rcode === 0){
                 const aRecords = dnsResponse.answers.filter(
                     answer =>
@@ -333,6 +386,31 @@ upstream.on("message", (response, remote) => {
                     console.log("NOERROR but non-cacheable record");
 
                 }
+            } else if(rcode === 3){
+                // SOA
+                const soaRecord = dnsResponse.authority.find(
+                    record => record.type === 6
+                );
+
+                if (soaRecord && soaRecord.address) {
+                    const negativeTtl = Math.min(
+                        soaRecord.ttl,
+                        soaRecord.address.minimum
+                    );
+
+                    if(negativeTtl > 0){
+                        storeCache(client.cacheKey, response, negativeTtl)
+
+                        console.log(`Cached NXDOMAIN: ${client.domain} | TTL: ${negativeTtl} seconds`);
+                    } else {
+                        console.log(`NXDOMAIN not cached: invalid negative TTL for ${client.domain}`);
+
+                    }
+
+                } else {
+                    console.log(`NXDOMAIN not cached: SOA record missing for${client.domain}`);
+
+                }
             } else {
                 // DNS error response
                 console.log(`Not caching ${rcodeName} response for ${client.domain}`);
@@ -350,6 +428,11 @@ upstream.on("message", (response, remote) => {
             console.log(
                 "Port:",
                 client.port
+            );
+
+            response.writeUInt16BE(
+                client.clientTransactionId,
+                0
             );
 
             server.send(
@@ -378,12 +461,38 @@ upstream.on("message", (response, remote) => {
 
         } catch (error) {
 
+            // preventing broken upstream packet from leaving stale state around
             console.error(
                 "Upstream response parsing failed:",
                 error.message
             );
+
+            if(response.length >= 2){
+
+                const transactionId = response.readUInt16BE(0)
+                const client = pendingRequests.get(transactionId)
+
+                if(client){
+                    clearTimeout(client.timeout)
+                    pendingRequests.delete(transactionId)
+
+                    console.log(`Removed pending request for transaction ${transactionId}`);
+                }
+            }
         }
-    
+})
+
+// socket failure
+upstream.on("error", (error) => {
+    console.error("Upstream DNS socket error: ", error.message);
+
+    // cleaning pending requests
+    for (const [transactionId, client] of pendingRequests) {
+        clearTimeout(client.timeout)
+        pendingRequests.delete(transactionId)
+
+        console.log(`Removed pending request ${transactionId} due to upstream socket error`);
+    }
 })
 
 server.on("error", (error) => {

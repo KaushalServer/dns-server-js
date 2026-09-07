@@ -77,7 +77,7 @@ const googleQuery =
     buildDnsQuery("google.com", 1004, 28); // AAAA 
 
 const githubQuery =
-    buildDnsQuery("www.google.com", 1005, 5);
+    buildDnsQuery("www.this-domain-doesnt-exist-987654321-asdb.com", 1005, 5);
 
 const exampleQuery =
     buildDnsQuery("google.com", 1006, 1);
@@ -147,21 +147,21 @@ client.send(
     }
 );
 
-// client.send(
-//     exampleQuery,
-//     1053,
-//     "127.0.0.1",
-//     (error) => {
-//         if (error) {
-//             console.error("Send error:", error);
-//             // client.close();
-//             return;
-//         }
+client.send(
+    exampleQuery,
+    1053,
+    "127.0.0.1",
+    (error) => {
+        if (error) {
+            console.error("Send error:", error);
+            // client.close();
+            return;
+        }
 
-//         console.log("Message sent!");
+        console.log("Message sent!");
 
-//         // client.close();
-//     }
-// );
+        // client.close();
+    }
+);
 
 // With transactionId the requests are being overwritten by the other
